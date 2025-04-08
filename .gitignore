@@ -1,0 +1,5 @@
+/info/
+/openssl_*/
+/*.tar
+/*.tar.gz
+/*.tar.xz
