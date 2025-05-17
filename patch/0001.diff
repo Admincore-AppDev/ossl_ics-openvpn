@@ -1,0 +1,14 @@
+# 3.5.0 77624f0 Fix aesv8 arm assembler code not working on 32 bit Android
+diff --git a/crypto/aes/asm/aesv8-armx.pl b/crypto/aes/asm/aesv8-armx.pl
+index 4f503a31ca..af501f8ff5 100755
+--- a/crypto/aes/asm/aesv8-armx.pl
++++ b/crypto/aes/asm/aesv8-armx.pl
+@@ -152,7 +152,7 @@ $code.=<<___	if ($flavour =~ /64/);
+ 	adrp	$ptr,.Lrcon
+ 	add	$ptr,$ptr,:lo12:.Lrcon
+ ___
+-$code.=<<___	if ($flavour =~ /32/);
++$code.=<<___	if ($flavour !~ /64/);
+ 	adr	$ptr,.Lrcon
+ ___
+ $code.=<<___;
