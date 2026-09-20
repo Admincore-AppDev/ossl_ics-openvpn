@@ -14,7 +14,7 @@ ndk_toolchain_sdkint=29
 ## Use '#' to comment out specific args
 ## "no-module" is mandatory for static Legacy-Provider (DONT-REMOVE!)
 ## "no-engine" means all engines e.g. "afalgeng, capieng and padlockeng"
-## Android can't use engines at all
+## Android can't use engines at all, also deprecated in openssl-4.0.x
 config_args='
 -DL_ENDIAN
 -D__ANDROID_API__='$ndk_toolchain_sdkint'
@@ -35,6 +35,7 @@ no-rfc3779
 no-rmd160
 no-seed
 no-sm2-precomp
+no-tests
 no-ts
 no-whirlpool'
 
@@ -218,28 +219,16 @@ function func_usage () {
   exit 1
 }
 
-function gen_asm () {
-  ## Generate Perlasm-Code with Make
-  local gen_asm_in="$tmp_libcrypto_asm"
-  local gen_asm_out
-  echo -e "\nGenerating ${target}_Assembler ...\n"
-  for gen_asm_out in $gen_asm_in; do
-    make $gen_asm_out
-    if [ -n "$(echo $gen_asm_out | grep 'armx')" ]; then
-      echo -e "\nMove $gen_asm_out ...\n"
-      mv -f "$gen_asm_out" "$(echo $gen_asm_out | awk '{gsub(/armx/,"armx_'$bits'"); print}')"
+function make_deps () {
+  [ "$target" = "arm" ] && for deps in $(echo "$tmp_deps" | grep '\.c$\|\.h$\|\.inc$'); do make $deps; done
+  for asm in $(echo "$tmp_deps" | grep '\.S$\|\.s$'); do
+    make $asm
+    if [ -n "$(echo $asm | grep 'armx')" ]; then
+      local mv_to=$(echo $asm | awk '{gsub(/armx/,"armx_'$bits'"); print}')
+      echo -e "\nMove $asm to $mv_to ...\n"
+      mv -f "$asm" "$mv_to"
     fi
   done
-}
-
-function make_in_files () {
-  ## Search in OpenSSL-Source to find *.in files and expand them with Make
-  if [ "$target" = "arm" ]; then
-    local make_in_files_in=$(find crypto include providers ssl -name '*.in' | awk '{gsub(/\.in$/, ""); print}' | sort -u)
-    local make_in_files_out
-    echo -e "\nFound *.in files:\n\n$make_in_files_in\n"
-    for make_in_files_out in $make_in_files_in; do make $make_in_files_out || true; done
-  fi
   make crypto/buildinf.h || true
   make include/crypto/bn_conf.h || true
   make include/openssl/configuration.h || true
@@ -354,9 +343,9 @@ fi
 ## Apply Patches
 func_patch
 
-## Remove specific Config_Args for OpenSSL-3.1 and lower
+## Remove specific Config_Args for openssl-3.1.x and lower
 [ -z "$(echo $ossl_version | grep -v 'openssl-3.0\|openssl-3.1')" ] && config_args=$(echo "$config_args" | awk '{gsub(/no-apps|no-docs|no-sm2-precomp/, ""); print}')
-## Remove specific Config_Args for OpenSSL-4.0 and greater
+## Remove specific Config_Args for openssl-4.0.x and greater
 [ -z "$(echo $ossl_version | grep -v 'openssl-4.0')" ] && config_args=$(echo "$config_args" | awk '{gsub(/no-engine/, ""); print}')
 
 ## Expand Config_Args if user is Admincore-AppDev (minimal OpenSSL-Build)
@@ -367,41 +356,43 @@ fi
 
 ## Main Loop for CMake–Targets
 for target in arm arm64 x86 x86_64; do
-	func_verbose ./Configure $(echo "$config_args" | grep -v '#.*') $([ "$target" = "arm" ] && echo '-D__ARM_MAX_ARCH__=8') android-$target
+  echo
+  func_verbose ./Configure $(echo "$config_args" | grep -v '#.*') $([ "$target" = "arm" ] && echo '-D__ARM_MAX_ARCH__=8') android-$target
+  ## Inject argument to Makefile to print any Var inside Makefile
+  echo 'print-%: ; @echo $($*)' >> Makefile
 
-	tmp_flags="-D$($perl_exe -we 'use FindBin 1.51 qw( $RealBin );use lib $RealBin;use configdata; print join("\n-D", @{$unified_info{defines}{libcrypto}})')"
-	tmp_makefile=$(cat Makefile | grep '\.o:' | grep -v '_win')
-	tmp_libcrypto_srcs=$(echo "$tmp_makefile" | grep 'libdefault-\|libcommon-\|libcrypto-\|liblegacy-\|libtemplate-' | awk '{print "\t" $2}' | grep '\.c$' | sort -u)
-	tmp_libcrypto_asm=$(echo "$tmp_makefile" | grep 'crypto\/' | awk '{print "\t\t" $2}' | grep '\.S$\|\.s$' | sort -u)
+  tmp_flags="-D$($perl_exe -we 'use FindBin 1.51 qw( $RealBin );use lib $RealBin;use configdata; print join("\n-D", @{$unified_info{defines}{libcrypto}})')"
+  tmp_makefile=$(cat Makefile | grep '\.o:' | grep -v '_win')
+  tmp_libcrypto_srcs=$(echo "$tmp_makefile" | grep 'libdefault-\|libcommon-\|libcrypto-\|liblegacy-\|libtemplate-' | awk '{print "\t" $2}' | grep '\.c$' | sort -u)
+  tmp_libcrypto_asm=$(echo "$tmp_makefile" | grep 'crypto\/' | awk '{print "\t\t" $2}' | grep '\.S$\|\.s$' | sort -u)
+  tmp_deps=$(make print-GENERATED_MANDATORY print-GENERATED | tr ' ' '\n')
 
-	if [ "$target" = "arm" ]; then
-		bits=32
-		arm_flags=$(echo -e "$tmp_flags\n-D__ARM_MAX_ARCH__=8")
-		arm_libcrypto_asm=$(echo "$tmp_libcrypto_asm" | awk '{gsub(/armx/,"armx_32"); print}')
-		libssl_srcs=$(echo "$tmp_makefile" | grep 'libssl-' | awk '{print "\t" $2}' | grep '\.c$' | sort -u)
-		make_in_files
-	elif [ "$target" = "arm64" ]; then
-		bits=64
-		arm64_flags=$tmp_flags
-		arm64_libcrypto_asm=$(echo "$tmp_libcrypto_asm" | awk '{gsub(/armx/,"armx_64"); print}')
-		make_in_files
-		lib_cppflags=$(parse_c_args '^CPPFLAGS=|^CNF_CPPFLAGS=|^LIB_CPPFLAGS=')
-		lib_cflags=$(parse_c_args '^CFLAGS=|^CNF_CFLAGS=|^LIB_CFLAGS=')
-		lib_ldlags=$(parse_c_args '^LDLAGS=|^CNF_LDLAGS=|^LIB_LDFLAGS=')
-	elif [ "$target" = "x86" ]; then
-		x86_flags=$tmp_flags
-		x86_libcrypto_asm=$tmp_libcrypto_asm
-	elif [ "$target" = "x86_64" ]; then
-		x86_64_flags=$tmp_flags
-		x86_64_libcrypto_asm=$tmp_libcrypto_asm
-	fi
+  if [ "$target" = "arm" ]; then
+    bits=32
+    arm_flags=$(echo -e "$tmp_flags\n-D__ARM_MAX_ARCH__=8")
+    arm_libcrypto_asm=$(echo "$tmp_libcrypto_asm" | awk '{gsub(/armx/,"armx_32"); print}')
+    libssl_srcs=$(echo "$tmp_makefile" | grep 'libssl-' | awk '{print "\t" $2}' | grep '\.c$' | sort -u)
+  elif [ "$target" = "arm64" ]; then
+    bits=64
+    arm64_flags=$tmp_flags
+    arm64_libcrypto_asm=$(echo "$tmp_libcrypto_asm" | awk '{gsub(/armx/,"armx_64"); print}')
+    lib_cppflags=$(parse_c_args '^CPPFLAGS=|^CNF_CPPFLAGS=|^LIB_CPPFLAGS=')
+    lib_cflags=$(parse_c_args '^CFLAGS=|^CNF_CFLAGS=|^LIB_CFLAGS=')
+    lib_ldlags=$(parse_c_args '^LDLAGS=|^CNF_LDLAGS=|^LIB_LDFLAGS=')
+  elif [ "$target" = "x86" ]; then
+    x86_flags=$tmp_flags
+    x86_libcrypto_asm=$tmp_libcrypto_asm
+  elif [ "$target" = "x86_64" ]; then
+    x86_64_flags=$tmp_flags
+    x86_64_libcrypto_asm=$tmp_libcrypto_asm
+  fi
 
-	gen_asm
+  make_deps
 
-	mv -f configdata.pm Makefile $(mkdir -p ../info/$target && echo ../info/$target)/.
-	echo "$tmp_libcrypto_srcs" > ../info/$target/diff_libcrypto_$target
+  mv -f configdata.pm Makefile $(mkdir -p ../info/$target && echo ../info/$target)/.
+  echo "$tmp_libcrypto_srcs" > ../info/$target/diff_libcrypto_$target
 
-	echo
+  echo
 done
 
 ## Get all *.c files in one file and parse diffs for the CMake ABI-Targets
